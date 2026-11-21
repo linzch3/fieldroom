@@ -218,6 +218,133 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("<svg", qr["svg"])
         self.assertNotIn("http://127.0.0.1:", qr["svg"])
 
+    def test_two_active_groups_have_scoped_answers_revisions_and_end(self):
+        self.submitted()
+        second_key = self.claim(self.cards[1])
+        third_key = self.claim(self.cards[2])
+        first, second = (card["id"] for card in self.cards[:2])
+        a = self.manage(op="show", interview=None, qid=self.rating["id"], players=[first])["interview"]
+        before = self.call("/api/rev", key=self.key)
+        other_rev = self.call("/api/rev", key=third_key)
+        b = self.manage(op="show", interview=None, qid=self.choice["id"], players=[second])["interview"]
+        self.assertEqual(self.call("/api/rev", key=self.key), before)
+        self.assertEqual(self.call("/api/rev", key=third_key), other_rev)
+        self.assertEqual(self.call("/api/play", key=self.key)["live"]["value"], "2")
+        self.assertEqual(self.call("/api/play", key=second_key)["live"]["interviewId"], b)
+        self.assertIsNone(self.call("/api/play", key=second_key)["live"]["value"])
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.manage(op="end")
+        self.assertEqual(error.exception.code, 409)
+        for pid in [first, second]:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.manage(
+                    op="supplement", interview=b, player=pid, qid=self.rating["id"], reason="过时的补充"
+                )
+            self.assertEqual(error.exception.code, 409)
+        self.manage(
+            op="supplement", interview=a, player=first, qid=self.rating["id"], reason="原评分的原因"
+        )
+        self.assertEqual(self.detail()["supplements"][0]["interview"], a)
+        self.manage(op="form", form=self.form["id"], title="新版", questions=[self.choice])
+        self.assertIsNone(self.call("/api/play", key=self.key)["live"])
+        self.assertEqual(self.call("/api/play", key=second_key)["live"]["interviewId"], b)
+        for command in [
+            dict(op="end", interview=a),
+            dict(op="show", interview=a, qid=self.choice["id"], players=[first]),
+            dict(op="supplement", interview=a, player=first, qid=self.rating["id"], reason="已结束"),
+            dict(op="seal"),
+        ]:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.manage(**command)
+            self.assertEqual(error.exception.code, 409)
+        self.manage(op="end", interview=b)
+        self.manage(op="seal")
+        self.assertTrue(self.call("/api/manage", key=self.admin)["sealed"])
+
+    def test_concurrent_group_claim_and_idempotent_creation(self):
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.manage(op="show", interview=None, qid=self.rating["id"], players=[self.cards[0]["id"]])
+        self.assertEqual(error.exception.code, 409)
+        self.manage(op="open", form=self.form["id"])
+        barrier = threading.Barrier(2)
+        target = self.cards[0]["id"]
+
+        def start(q):
+            barrier.wait(timeout=5)
+            try:
+                return self.manage(
+                    op="show",
+                    interview=None,
+                    qid=q["id"],
+                    players=[target],
+                    requestId="start-" + q["id"],
+                )
+            except urllib.error.HTTPError as error:
+                return error.code
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(start, [self.rating, self.choice]))
+        self.assertEqual(sum(r == 409 for r in results), 1)
+        groups = self.call("/api/manage", key=self.admin)["interviews"]
+        self.assertEqual(len(groups), 1)
+        group = groups[0]
+        retried = self.manage(
+            op="show",
+            interview=None,
+            qid=group["qid"],
+            players=[target],
+            requestId="start-" + group["qid"],
+        )
+        self.assertEqual(retried, {"ok": True, "interview": group["id"]})
+        b = self.manage(op="show", interview=None, qid=self.choice["id"], players=[self.cards[1]["id"]])[
+            "interview"
+        ]
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.manage(op="show", interview=b, qid=self.choice["id"], players=[target])
+        self.assertEqual(error.exception.code, 409)
+        self.assertEqual(
+            [g["players"] for g in self.call("/api/manage", key=self.admin)["interviews"]],
+            [[target], [self.cards[1]["id"]]],
+        )
+
+    def test_old_database_active_interview_and_receipt_survive_upgrade(self):
+        self.submitted()
+        old_live = dict(qid=self.rating["id"], players=[self.cards[0]["id"]])
+        with server.connection(self.db, write=True) as db:
+            db.execute("UPDATE rooms SET live=? WHERE admin=?", (server.dump(old_live), self.admin))
+            db.execute("DROP TABLE receipts")
+            db.execute(
+                "CREATE TABLE receipts (actor TEXT NOT NULL,request_id TEXT NOT NULL, PRIMARY KEY(actor,request_id))"
+            )
+            db.execute("INSERT INTO receipts VALUES(?,?)", (self.key, "old-write"))
+            db.execute("DROP TABLE supplements")
+            db.execute(
+                "CREATE TABLE supplements (id INTEGER PRIMARY KEY,player TEXT NOT NULL REFERENCES players(id),qid TEXT NOT NULL,label TEXT NOT NULL,score TEXT NOT NULL,reason TEXT NOT NULL,at TEXT NOT NULL)"
+            )
+            db.execute(
+                "INSERT INTO supplements(player,qid,label,score,reason,at) VALUES(?,?,?,?,?,?)",
+                (
+                    self.cards[0]["id"],
+                    self.rating["id"],
+                    self.rating["label"],
+                    "4",
+                    "旧版访谈记录",
+                    server.timestamp(),
+                ),
+            )
+        server.initialize(self.db)
+        group = self.call("/api/manage", key=self.admin)["interviews"][0]
+        self.assertEqual(self.call("/api/play", key=self.key)["live"]["interviewId"], group["id"])
+        self.assertEqual(self.detail()["supplements"][0]["reason"], "旧版访谈记录")
+        self.assertIsNone(self.detail()["supplements"][0]["interview"])
+        self.play(op="answer", qid=self.rating["id"], value="5", requestId="old-write")
+        self.assertEqual(self.detail()["answers"][self.rating["id"]], "2")
+        server.initialize(self.db)
+        self.assertEqual(self.call("/api/manage", key=self.admin)["interviews"][0]["id"], group["id"])
+        self.manage(op="show", interview=None, qid=self.choice["id"], players=[self.cards[1]["id"]])
+        self.manage(op="show", interview=group["id"], qid=self.choice["id"], players=old_live["players"])
+        self.assertEqual(len(self.call("/api/manage", key=self.admin)["interviews"]), 2)
+
     def test_long_history_is_indexed_paged_and_excluded_from_player_reads(self):
         self.submitted()
         with server.connection(self.db, write=True) as db:

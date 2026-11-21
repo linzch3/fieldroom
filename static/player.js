@@ -123,8 +123,12 @@ async function sendReady(force) {
   }
 }
 
+function reviewing(live) {
+  return live && live.qid === view.reviewQuestion && live.interviewId === view.reviewInterview;
+}
+
 function follows(live) {
-  return live && (resumeRequested || live.qid !== view.reviewQuestion);
+  return live && (resumeRequested || !reviewing(live));
 }
 
 async function cycle() {
@@ -150,8 +154,9 @@ async function cycle() {
     if (follows(fresh.live) && composing) {
       mustRead = true;
     } else {
-      if (view.reviewQuestion && (resumeRequested || fresh.live?.qid !== view.reviewQuestion)) {
+      if (view.reviewQuestion && (resumeRequested || !reviewing(fresh.live))) {
         delete view.reviewQuestion;
+        delete view.reviewInterview;
         rememberView();
       }
       resumeRequested = false;
@@ -333,7 +338,7 @@ function render() {
   const data = inputs();
   const form = pickForm();
   if (form && !view.form) { view.form = form.id; rememberView(); }
-  const live = room.live?.qid === view.reviewQuestion ? null : room.live;
+  const live = reviewing(room.live) ? null : room.live;
   const entering = live && !app().querySelector(".live-sheet");
   const leaving = !live && !!app().querySelector(".live-sheet");
   // Structural changes can affect controls; ordinary autosave/poll replies only
@@ -369,6 +374,7 @@ function bind() {
     }
     if (el.hasAttribute("data-review") && room.live) {
       view.reviewQuestion = room.live.qid;
+      view.reviewInterview = room.live.interviewId;
       view.form = room.live.form;
       view.tab = "form";
       previousPlace = { y: 0 };

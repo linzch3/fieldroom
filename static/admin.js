@@ -82,7 +82,7 @@ function showDialog(dialog, kind, title, content) {
 
 const key = location.hash.slice(1);
 const state = {
-  room: null, tab: "overview", form: null, qid: null, targets: null,
+  room: null, tab: "overview", form: null, interview: null, qid: null, targets: null, previewDirty: false,
   detail: null, detailPlayer: null, detailRequest: 0,
   editor: null, busy: false, qr: new Map(), qrEpoch: 0, reading: 0
 };
@@ -114,9 +114,16 @@ function formatAnswer(value, type) {
 async function loadRoom() {
   const sequence = ++state.reading;
   const room = await adminRead("/api/manage");
+  if (!Array.isArray(room.interviews)) {
+    throw new Error("后台服务需要更新。请在主机重启新版 Fieldroom，再重新连接。");
+  }
   if (sequence !== state.reading || (state.room && room.rev < state.room.rev)) return;
+  if (state.room?.id !== room.id) {
+    try { state.interview = sessionStorage.getItem("fieldroom.host.group." + room.id); }
+    catch { state.interview = null; }
+  }
   state.room = room;
-  if (state.targets === null) state.targets = new Set(room.live?.players || room.players.slice(0, 6).map(p => p.id));
+  if (!state.previewDirty) synchronizePreview();
   if (!state.form) state.form = room.forms[0]?.id;
   render();
   if (dialog.open && dialog.dataset.kind === "detail") await loadDetail(state.detailPlayer);
@@ -124,7 +131,7 @@ async function loadRoom() {
 
 function shell() {
   $("#app").innerHTML = `<div class="wrap admin-wrap">
-    <section class="admin-heading"><div><p class="eyebrow">研究员工作台</p><h1 id="room-title"></h1></div>
+    <section class="admin-heading"><div><a class="workbench-link no-print" href="/">场次工作台</a><h1 id="room-title"></h1></div>
       <div class="row no-print" id="room-actions"></div></section>
     <nav class="tabs no-print" aria-label="场次管理" id="admin-nav"></nav>
     <div id="admin-view"></div></div>`;
@@ -149,7 +156,7 @@ function render() {
   const room = state.room;
   $("#room-title").textContent = room.title;
   setMarkup($("#room-actions"), actionButton("share-admin", "复制管理链接") +
-    actionButton(room.sealed ? "reopen" : "seal", room.sealed ? "重新开放场次" : "封存场次", {disabled: !room.sealed && !!room.live}));
+    actionButton(room.sealed ? "reopen" : "seal", room.sealed ? "重新开放场次" : "封存场次", {disabled: !room.sealed && room.interviews.length > 0}));
   setMarkup($("#admin-nav"), sections.map(([id, label]) =>
     `<button type="button" class="tab${state.tab === id ? " active" : ""}" data-action="tab" data-value="${id}" aria-current="${state.tab === id ? "page" : "false"}">${label}</button>`).join(""));
   if (state.tab === "cards" && $("#cards-grid")) return;
@@ -159,7 +166,7 @@ function render() {
 }
 
 function overviewView() {
-  const {players, forms, sealed, live} = state.room;
+  const {players, forms, sealed, interviews} = state.room;
   const cards = forms.map((form, i) => {
     const count = completeCount(form);
     return `<article class="card progress-card">
@@ -173,7 +180,7 @@ function overviewView() {
     ${forms.map(form => `<td>${player.submitted.includes(form.id) ? statusBadge("已交",true) : (form.open ? "未交" : "待开放")}</td>`).join("")}
     <td>${actionButton("detail", "查看记录", {value: player.id})}</td></tr>`).join("");
   return `<section class="stack"><div class="section-head"><h2>交卷进度</h2>
-    ${statusBadge(sealed ? "场次已封存" : live ? "访谈进行中" : "场次进行中", !sealed)}</div>
+    ${statusBadge(sealed ? "场次已封存" : interviews.length ? `${interviews.length} 组访谈进行中` : "场次进行中", !sealed)}</div>
     <div class="progress-grid">${cards}</div></section>
     <section class="panel admin-section"><div class="section-head"><h2>玩家记录</h2><span class="muted">共 ${players.length} 人</span></div>
     <div class="table-wrap"><table><thead><tr><th>玩家</th>${forms.map(form => `<th>${escapeHTML(form.title)}</th>`).join("")}<th>记录</th></tr></thead>
@@ -196,42 +203,120 @@ function formsView() {
     ${form.id === next?.id && !sealed ? actionButton("open", "开放问卷", {value:form.id,style:"primary"}) : ""}</div></div>
     <ol class="question-list">${list}</ol></section></div>`;
 }
+function activeInterview() {
+  return state.room.interviews.find(item => item.id === state.interview);
+}
+function otherInterviewMembers() {
+  const taken = new Set();
+  for (const group of state.room.interviews) {
+    if (group.id !== state.interview) group.players.forEach(id => taken.add(id));
+  }
+  return taken;
+}
+function synchronizePreview() {
+  const group = activeInterview();
+  if (group) {
+    state.targets = new Set(group.players);
+    state.qid = group.qid;
+  } else if (!state.interview) {
+    const taken = otherInterviewMembers();
+    const free = state.room.players.filter(p => !taken.has(p.id));
+    state.targets = new Set(free.slice(0,6).map(p => p.id));
+    const open = state.room.forms.filter(f => f.open);
+    if (!open.some(f => byId(f.questions,state.qid))) state.qid = open[0]?.questions[0]?.id;
+  }
+  // Keep a remotely ended selection pinned until its host chooses another group.
+}
+function rememberInterview(id) {
+  state.interview = id;
+  const storageKey = "fieldroom.host.group." + state.room.id;
+  try {
+    if (id) sessionStorage.setItem(storageKey,id);
+    else sessionStorage.removeItem(storageKey);
+  } catch {
+    // The selection still works for this page when browser storage is unavailable.
+  }
+}
+function selectInterview(id) {
+  rememberInterview(id);
+  state.previewDirty = false;
+  state.qid = null;
+  synchronizePreview();
+  render();
+}
+function groupDirectory(questionSet) {
+  const {room} = state;
+  const names = new Map(room.players.map(p => [p.id,p.name]));
+  const labels = new Map(questionSet.map(q => [q.id,q.label]));
+  const groups = room.interviews.map(group => {
+    const selected = group.id === state.interview;
+    return `<button type="button" class="group-pick${selected ? " selected" : ""}" data-action="pick-interview"
+      data-value="${escapeHTML(group.id)}" aria-pressed="${selected}"><strong>${escapeHTML(group.players.map(id => names.get(id)).join("、"))}</strong>
+      <small>正在展示 · ${escapeHTML(labels.get(group.qid) || "已调整的题目")}</small></button>`;
+  }).join("");
+  return `<section class="panel group-directory"><div class="section-head">
+    <h2>进行中的访谈 <span class="group-count">${room.interviews.length}</span></h2>
+    ${actionButton("new-interview","新建访谈",{disabled:room.sealed})}</div>
+    ${groups ? `<div class="group-grid">${groups}</div>` : ""}</section>`;
+}
 function interviewView() {
   const {room, targets} = state;
-  const available = questions();
-  let question = byId(available, state.qid);
-  if (!question) {
-    question = byId(available, room.live?.qid) || available[0];
-    state.qid = question?.id;
+  const all = questions();
+  const group = activeInterview();
+  const directory = groupDirectory(all);
+  if (state.interview && !group) {
+    return directory + '<section class="panel admin-section"><h2>所选访谈已结束</h2><p class="muted">可以选择进行中的访谈，或新建访谈。</p></section>';
   }
-  const selected = room.players.filter(player => targets.has(player.id));
-  const missing = question ? selected.filter(player => !player.submitted.includes(question.form.id)) : [];
-  const selectedLabel = selected.length ? `${selected.length - missing.length}/${selected.length} 人已交卷` : "请选择受访者";
-  const liveQuestion = byId(questions(), room.live?.qid);
-  const caption = room.live ? `正在展示 · ${liveQuestion?.label || "已调整的题目"}` : "访谈尚未开始";
-  const pickers = room.players.map(player => `<label class="target-chip${targets.has(player.id) ? " selected" : ""}">
-    <input type="checkbox" name="target" value="${escapeHTML(player.id)}"${targets.has(player.id) ? " checked" : ""}>
-    ${escapeHTML(player.name)}</label>`).join("");
-  const options = room.forms.map(f =>
+  const available = all.filter(q => q.form.open);
+  const question = byId(available, state.qid);
+  const otherMembers = otherInterviewMembers();
+  const selected = room.players.filter(p => targets.has(p.id));
+  const conflicts = selected.filter(p => otherMembers.has(p.id));
+  const missing = question ? selected.filter(p => !p.submitted.includes(question.form.id)) : [];
+  const progress = selected.length ? `${selected.length - missing.length}/${selected.length} 人已交卷` : "请选择受访者";
+  const liveQuestion = byId(all, group?.qid);
+  const caption = group ? `正在展示 · ${liveQuestion?.label || "已调整的题目"}` : "新访谈";
+  const pickers = room.players.map(p => {
+    const occupied = otherMembers.has(p.id);
+    const checked = targets.has(p.id);
+    return `<label class="target-chip${checked ? " selected" : ""}${occupied ? " occupied" : ""}"><input type="checkbox" name="target"
+      value="${escapeHTML(p.id)}"${checked ? " checked" : ""}${occupied || room.sealed ? " disabled" : ""}>${escapeHTML(p.name)}${occupied ? " · 在其他组" : ""}</label>`;
+  }).join("");
+  const options = room.forms.filter(f => f.open).map(f =>
     `<optgroup label="${escapeHTML(f.title)}">${f.questions.map(q => option(q.id,q.label,state.qid)).join("")}</optgroup>`).join("");
-  return `<section class="panel interview-control"><div class="section-head"><div><p class="eyebrow">访谈状态</p><h2>${escapeHTML(caption)}</h2></div>
-    ${room.live ? actionButton("end","结束访谈") : ""}</div>
-    ${room.live ? `<p class="muted">受访者 · ${escapeHTML(room.players.filter(p => room.live.players.includes(p.id)).map(p=>p.name).join("、"))}</p>` : ""}
+  const unavailable = room.sealed || !question || !selected.length || selected.length > 6 || conflicts.length > 0;
+  return directory + `<section class="panel admin-section interview-control"><div class="section-head"><h2>${escapeHTML(caption)}</h2>
+    ${group ? actionButton("end","结束访谈") : ""}</div>
     <div class="control-group"><h3>受访者</h3><div class="row target-list">${pickers}</div></div>
-    <label class="field">访谈题目<select id="preview-question" ${question ? "" : "disabled"}>
-    ${options || '<option>请先编排题目</option>'}</select></label>
-    <div class="preview-line"><div><strong>${escapeHTML(selectedLabel)}</strong>
+    ${conflicts.length ? `<div class="row"><small>所选玩家中有人已加入其他组。</small>${actionButton("remove-occupied","移除已占用的选择")}</div>` : ""}
+    <label class="field">访谈题目<select id="preview-question"${room.sealed || !options ? " disabled" : ""}>
+    ${question ? "" : `<option value="" selected>${options ? "请选择题目" : "请先开放一份问卷"}</option>`}${options}</select></label>
+    <div class="preview-line"><div><strong>${escapeHTML(progress)}</strong>
     ${missing.length ? `<small>未交卷 · ${escapeHTML(missing.map(p=>p.name).join("、"))}</small>` : ""}</div>
-    ${actionButton("show","向受访者展示",{style:"primary",disabled:room.sealed || !question || !selected.length || selected.length > 6})}</div>
+    ${actionButton("show","向受访者展示",{style:"primary",disabled:unavailable})}</div>
     ${selected.length > 6 ? '<p class="muted">每次访谈最多选择六位玩家。</p>' : ""}</section>
-    ${room.live ? supplementList() : ""}`;
+    ${group ? supplementList(group) : ""}`;
 }
-function supplementList() {
+function supplementList(group) {
   const {room} = state;
   return `<section class="panel admin-section"><div class="section-head"><h2>访谈补充</h2></div>
-    ${room.players.filter(p => room.live.players.includes(p.id)).map(p => `<div class="list-row"><strong>${escapeHTML(p.name)}</strong>
+    ${room.players.filter(p => group.players.includes(p.id)).map(p => `<div class="list-row"><strong>${escapeHTML(p.name)}</strong>
     <div class="row">${actionButton("detail","查看记录",{value:p.id})}
     ${actionButton("supplement","追加记录",{value:p.id,disabled:room.sealed})}</div></div>`).join("")}</section>`;
+}
+async function showInterview() {
+  const response = await post({op:"show",interview:state.interview,qid:state.qid,players:[...state.targets]});
+  rememberInterview(response.interview);
+  state.previewDirty = false;
+  await loadRoom();
+  toast("已向受访者展示");
+}
+async function endInterview() {
+  await post({op:"end",interview:state.interview});
+  rememberInterview(null);
+  state.previewDirty = false;
+  await loadRoom();
+  toast("访谈已结束，玩家可继续填写");
 }
 function cardsView() {
   return `<section class="stack"><div class="section-head no-print"><h2>玩家入场卡</h2>${actionButton("print","打印玩家卡")}</div>
@@ -406,7 +491,7 @@ async function showDetail(id) {
   await loadDetail(id);
 }
 async function showSupplement(id) {
-  const live = state.room.live;
+  const live = activeInterview();
   const question = byId(questions(), live?.qid);
   if (!question || !live.players.includes(id)) throw new Error("访谈题目已更改，请重新选择玩家。");
   const p = byId(state.room.players, id);
@@ -416,7 +501,7 @@ async function showSupplement(id) {
   const original = submitted ? formatAnswer(details.answers[question.id], snapshot?.type || question.type) : "暂无已提交答案";
   const score = question.type === "rating" ? `<label class="field">访谈评分<select name="score">
     <option value="">仅记录解释</option>${[1,2,3,4,5].map(v=>option(v,v + " 分","")).join("")}</select></label>` : "";
-  showDialog(dialog,"supplement",p.name + " · 访谈补充",`<form class="stack" id="supplement-form" data-player="${escapeHTML(id)}" data-qid="${escapeHTML(question.id)}">
+  showDialog(dialog,"supplement",p.name + " · 访谈补充",`<form class="stack" id="supplement-form" data-interview="${escapeHTML(live.id)}" data-player="${escapeHTML(id)}" data-qid="${escapeHTML(question.id)}">
     <div><h3>${escapeHTML(snapshot?.label || question.label)}</h3><p class="muted">答卷记录 · ${escapeHTML(original)}</p></div>
     ${score}<label class="field">原因或口头回答<textarea name="reason" required rows="3"></textarea></label>
     <div class="row"><button type="submit" class="btn primary">保存补充</button></div></form>`);
@@ -425,7 +510,7 @@ async function saveSupplement() {
   const form = $("#supplement-form");
   const reason = form.elements.reason.value.trim();
   if (!reason) throw new Error("请填写原因或口头回答。");
-  await post({op:"supplement",player:form.dataset.player,qid:form.dataset.qid,score:form.elements.score?.value || "",reason});
+  await post({op:"supplement",interview:form.dataset.interview,player:form.dataset.player,qid:form.dataset.qid,score:form.elements.score?.value || "",reason});
   dialog.close();
   await loadRoom();
   toast("访谈补充已保存");
@@ -455,10 +540,12 @@ async function runAction(action) {
 }
 function dispatchChange(event) {
   if (event.target.matches("[name=target]")) {
+    state.previewDirty = true;
     if (event.target.checked) state.targets.add(event.target.value);
     else state.targets.delete(event.target.value);
     render();
   } else if (event.target.matches("#preview-question")) {
+    state.previewDirty = true;
     state.qid = event.target.value;
     render();
   } else if (event.target.matches(".editor-row select[name=type]")) {
@@ -474,7 +561,11 @@ function dispatchClick(event) {
   const {action,value} = button.dataset;
   runAction(async () => {
     switch (action) {
-      case "tab": state.tab = value; render(); break;
+      case "tab":
+        state.tab = value;
+        history.replaceState({fieldroomTab: value},"");
+        render();
+        break;
       case "pick-form": state.form = value; render(); break;
       case "edit-form": startEditing(value); break;
       case "add-q": case "up": case "down": case "delete-q": editQuestion(action,Number(value)); break;
@@ -490,8 +581,15 @@ function dispatchClick(event) {
       case "more-history": await moreHistory(); break;
       case "supplement": await showSupplement(value); break;
       case "open": await post({op:"open",form:value}); await loadRoom(); toast("问卷已开放"); break;
-      case "show": await post({op:"show",qid:state.qid,players:[...state.targets]}); await loadRoom(); toast("已向受访者展示"); break;
-      case "end": await post({op:"end"}); await loadRoom(); toast("访谈已结束，玩家可继续填写"); break;
+      case "pick-interview": selectInterview(value); break;
+      case "new-interview": selectInterview(null); break;
+      case "remove-occupied":
+        for (const id of otherInterviewMembers()) state.targets.delete(id);
+        state.previewDirty = true;
+        render();
+        break;
+      case "show": await showInterview(); break;
+      case "end": await endInterview(); break;
       case "seal":
         showDialog(dialog,"seal","封存整场？",`<div class="stack"><p>封存后，所有问卷和体验问题转为只读。需要更正时可重新开放。</p>
           <ul>${state.room.forms.map(form=>`<li>${escapeHTML(form.title)} · ${completeCount(form)}/${state.room.players.length} 人已交</li>`).join("")}</ul>
@@ -516,6 +614,8 @@ async function poll() {
 }
 export async function start() {
   if (!key) throw new Error("请使用本场的完整管理链接。");
+  const previousTab = history.state?.fieldroomTab;
+  if (sections.some(([id]) => id === previousTab)) state.tab = previousTab;
   shell();
   await loadRoom();
   $("#status").textContent = "后台已连接";

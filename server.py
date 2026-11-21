@@ -199,11 +199,11 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 CREATE TABLE IF NOT EXISTS supplements (
  id INTEGER PRIMARY KEY, player TEXT NOT NULL REFERENCES players(id), qid TEXT NOT NULL,
- label TEXT NOT NULL, score TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL
+ label TEXT NOT NULL, score TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, interview TEXT
 );
 CREATE INDEX IF NOT EXISTS supplements_player ON supplements(player,id);
 CREATE TABLE IF NOT EXISTS receipts (
- actor TEXT NOT NULL, request_id TEXT NOT NULL, PRIMARY KEY(actor,request_id)
+ actor TEXT NOT NULL, request_id TEXT NOT NULL, result TEXT, PRIMARY KEY(actor,request_id)
 );
 """
 
@@ -213,6 +213,13 @@ def initialize(path):
     with closing(sqlite3.connect(path)) as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript(SCHEMA)
+        # Receipts from the single-interview release always returned {"ok": true}.
+        db.execute("BEGIN IMMEDIATE")
+        if "result" not in {column[1] for column in db.execute("PRAGMA table_info(receipts)")}:
+            db.execute("ALTER TABLE receipts ADD COLUMN result TEXT")
+        if "interview" not in {column[1] for column in db.execute("PRAGMA table_info(supplements)")}:
+            db.execute("ALTER TABLE supplements ADD COLUMN interview TEXT")
+        db.commit()
     path.chmod(0o600)
 
 
@@ -357,7 +364,8 @@ def player_record(db, player, *, include_history=False, before_history=None):
         result["supplements"] = [
             dict(r)
             for r in db.execute(
-                "SELECT qid,label,score,reason,at FROM supplements WHERE player=? ORDER BY id", (player,)
+                "SELECT qid,label,score,reason,at,interview FROM supplements WHERE player=? ORDER BY id",
+                (player,),
             )
         ]
     return result
@@ -369,7 +377,64 @@ def managed_player(db, room, player):
     return row
 
 
+def active_interviews(room):
+    live = json.loads(room["live"] or "[]")
+    if isinstance(live, dict):
+        # A stable ID keeps already-running interviews selectable across restarts;
+        # a group's next write transparently upgrades the live column to an array.
+        return [{**live, "id": "legacy-" + room["id"]}]
+    return live or []
+
+
+def set_interviews(db, room, groups):
+    db.execute("UPDATE rooms SET live=? WHERE id=?", (dump(groups) if groups else None, room))
+
+
+def requested_interview(groups, body):
+    if "interview" not in body:
+        require(len(groups) <= 1, "本场有多场访谈，请先选择具体访谈", 409)
+        return groups[0] if groups else None
+    wanted = body["interview"]
+    if wanted is None and body["op"] == "show":
+        return None
+    selected = next((g for g in groups if g["id"] == wanted), None)
+    require(selected, "这场访谈已结束，请重新选择", 409)
+    return selected
+
+
+def update_interview(db, room, body):
+    groups = active_interviews(room)
+    current = requested_interview(groups, body)
+    affected = set(current["players"]) if current else set()
+    result = {"ok": True}
+    if body["op"] == "end":
+        if not current:
+            return result
+        groups.remove(current)
+    else:
+        form, question = find_question(db, room["id"], body.get("qid"))
+        players = body.get("players")
+        require(isinstance(players, list) and 1 <= len(players) <= 6, "每次访谈请选择 1 至 6 位玩家")
+        require(len(players) == len(set(players)), "请勿重复选择受访者")
+        for pid in players:
+            managed_player(db, room["id"], pid)
+        require(form["open"], "请先开放这份问卷，再展示题目", 409)
+        occupied = {pid for group in groups if group is not current for pid in group["players"]}
+        require(occupied.isdisjoint(players), "所选玩家正在另一场访谈，请刷新后重新选择", 409)
+        if current is None:
+            current = {"id": identifier()}
+            groups.append(current)
+        current.update(qid=question["id"], players=players)
+        affected.update(players)
+        result["interview"] = current["id"]
+    set_interviews(db, room["id"], groups)
+    db.execute("UPDATE rooms SET rev=rev+1 WHERE id=?", (room["id"],))
+    db.executemany("UPDATE players SET rev=rev+1 WHERE id=?", [(pid,) for pid in affected])
+    return result
+
+
 def manage_state(db, room, base):
+    groups = active_interviews(room)
     by_player = {}
     for r in db.execute(
         "SELECT s.player,s.form FROM players p JOIN submissions s ON s.player=p.id WHERE p.room=?",
@@ -387,7 +452,8 @@ def manage_state(db, room, base):
         rev=room["rev"],
         forms=room_forms(db, room["id"]),
         players=players,
-        live=json.loads(room["live"] or "null"),
+        interviews=groups,
+        live=groups[0] if len(groups) == 1 else None,
         base=base,
     )
 
@@ -395,9 +461,9 @@ def manage_state(db, room, base):
 def play_state(db, room, player):
     data = player_record(db, player["id"])
     forms = room_forms(db, room["id"], True)
-    live = json.loads(room["live"] or "null")
+    live = next((g for g in active_interviews(room) if player["id"] in g["players"]), None)
     event = None
-    if live and player["id"] in live["players"]:
+    if live:
         form, q = find_question(db, room["id"], live["qid"])
         original = (
             db.execute(
@@ -407,6 +473,7 @@ def play_state(db, room, player):
             else None
         )
         event = dict(
+            interviewId=live["id"],
             qid=q["id"],
             label=json.loads(original["snapshot"])["label"] if original else q["label"],
             form=form["id"],
@@ -456,14 +523,12 @@ def manage_action(db, room, body):
     require(not room["sealed"] or op in ("seal", "reopen"), "场次已封存，请先重新开放", 409)
     if op in ("seal", "reopen"):
         sealed = op == "seal"
-        require(not sealed or room["live"] is None, "请先结束访谈，再封存场次", 409)
+        require(not sealed or not active_interviews(room), "请先结束全部访谈，再封存场次", 409)
         if bool(room["sealed"]) == sealed:
             return
         db.execute("UPDATE rooms SET sealed=?,live=NULL WHERE id=?", (sealed, rid))
-    elif op == "end":
-        if room["live"] is None:
-            return
-        db.execute("UPDATE rooms SET live=NULL WHERE id=?", (rid,))
+    elif op in ("show", "end"):
+        return update_interview(db, room, body)
     elif op == "open":
         form = find_form(db, rid, body.get("form"))
         if form["opened"]:
@@ -482,24 +547,22 @@ def manage_action(db, room, body):
             require(body["expectedRev"] == room["rev"], "场次已有更新，请刷新后重试", 409)
         title = short(body.get("title"), "问卷名称", 200)
         questions = validate_questions(body.get("questions"), json.loads(form["questions"]))
-        live = json.loads(room["live"] or "null")
-        if live and any(q["id"] == live["qid"] for q in json.loads(form["questions"])):
-            if not any(q["id"] == live["qid"] for q in questions):
-                db.execute("UPDATE rooms SET live=NULL WHERE id=?", (rid,))
+        removed = {q["id"] for q in json.loads(form["questions"])} - {q["id"] for q in questions}
+        if removed:
+            groups = active_interviews(room)
+            remaining = [g for g in groups if g["qid"] not in removed]
+            if len(remaining) != len(groups):
+                set_interviews(db, rid, remaining)
         db.execute(
             "UPDATE forms SET title=?,questions=?,version=version+1 WHERE id=?",
             (title, dump(questions), form["id"]),
         )
-    elif op == "show":
-        _, q = find_question(db, rid, body.get("qid"))
-        ids = body.get("players")
-        require(isinstance(ids, list) and 1 <= len(ids) <= 6, "每次访谈请选择 1 至 6 位玩家")
-        require(len(ids) == len(set(ids)), "请勿重复选择受访者")
-        for pid in ids:
-            managed_player(db, rid, pid)
-        db.execute("UPDATE rooms SET live=? WHERE id=?", (dump(dict(qid=q["id"], players=ids)), rid))
     elif op == "supplement":
         pid = managed_player(db, rid, body.get("player"))["id"]
+        group = requested_interview(active_interviews(room), body)
+        in_group = group and pid in group["players"] and body.get("qid") == group["qid"]
+        if "interview" in body:
+            require(in_group, "访谈题目或受访者已变更，请重新查看", 409)
         _, q = find_question(db, rid, body.get("qid"))
         reason = short(body.get("reason"), "访谈补充", 20000)
         score = body.get("score", "")
@@ -508,8 +571,8 @@ def manage_action(db, room, body):
             "补充评分超出范围",
         )
         db.execute(
-            "INSERT INTO supplements(player,qid,label,score,reason,at) VALUES(?,?,?,?,?,?)",
-            (pid, q["id"], q["label"], score, reason, timestamp()),
+            "INSERT INTO supplements(player,qid,label,score,reason,at,interview) VALUES(?,?,?,?,?,?,?)",
+            (pid, q["id"], q["label"], score, reason, timestamp(), group["id"] if in_group else None),
         )
         # Only researchers see supplements; player screens need not refresh.
         db.execute("UPDATE rooms SET rev=rev+1 WHERE id=?", (rid,))
@@ -624,14 +687,18 @@ def mutate_once(db, actor, body, fn):
     request_id = body.get("requestId")
     if request_id is not None:
         short(request_id, "操作编号", 128)
-        if db.execute(
-            "SELECT 1 FROM receipts WHERE actor=? AND request_id=?", (actor, request_id)
-        ).fetchone():
-            return {"ok": True}
-    fn()
+        receipt = db.execute(
+            "SELECT result FROM receipts WHERE actor=? AND request_id=?", (actor, request_id)
+        ).fetchone()
+        if receipt:
+            return json.loads(receipt["result"]) if receipt["result"] else {"ok": True}
+    result = fn() or {"ok": True}
     if request_id is not None:
-        db.execute("INSERT INTO receipts VALUES(?,?)", (actor, request_id))
-    return {"ok": True}
+        db.execute(
+            "INSERT INTO receipts(actor,request_id,result) VALUES(?,?,?)",
+            (actor, request_id, dump(result)),
+        )
+    return result
 
 
 def handle(h, method, path, query, body):
