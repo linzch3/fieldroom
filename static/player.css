@@ -130,3 +130,9 @@
 .older-questions summary { cursor: pointer; color: #375646; }
 .older-questions > div { margin-top: .8rem; }
 .older-questions p { margin: .3rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.live-review { margin-top: 1rem; }
+.review-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+  padding: .7rem 1rem; margin-bottom: 1rem; border: 1px solid var(--player-line);
+  border-radius: .75rem; background: #edf4e9; color: var(--player-green);
+}

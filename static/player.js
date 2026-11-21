@@ -11,7 +11,7 @@ const app = () => $("#app");
 let code, lease, room, queue = [], failed = [], view = {}, previousPlace;
 let timer, active, mustRead = false, forceSave = false, nextPoll = 0;
 let templateKey = "", networkDown = false, signedOut = false, composing = false;
-let noteId, storageWarning = false;
+let noteId, storageWarning = false, resumeRequested = false;
 
 function uuid() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
@@ -123,6 +123,10 @@ async function sendReady(force) {
   }
 }
 
+function follows(live) {
+  return live && (resumeRequested || live.qid !== view.reviewQuestion);
+}
+
 async function cycle() {
   const force = forceSave;
   forceSave = false;
@@ -137,15 +141,20 @@ async function cycle() {
     let fresh = await playState();
     // Participant selection and question jump arrive in one snapshot. Delay
     // presentation until every local edit has an acknowledgement.
-    if (fresh.live && !composing) {
+    if (follows(fresh.live) && !composing) {
       while (queue.length) {
         await sendReady(true);
         fresh = await playState();
       }
     }
-    if (fresh.live && composing) {
+    if (follows(fresh.live) && composing) {
       mustRead = true;
     } else {
+      if (view.reviewQuestion && (resumeRequested || fresh.live?.qid !== view.reviewQuestion)) {
+        delete view.reviewQuestion;
+        rememberView();
+      }
+      resumeRequested = false;
       room = fresh;
       store(key("state"), room);
       mustRead = false;
@@ -276,7 +285,8 @@ function liveView(live) {
     esc(form?.title || "") + '</span></div><h2 class="live-question">' + esc(live.label) +
     '</h2><div class="live-response"><div class="live-caption">我的问卷答案</div><div class="live-answer' +
     (hasAnswer && /^([1-5])$/.test(live.value) ? " numeric" : "") + '">' +
-    esc(hasAnswer ? live.value : submitted ? "此题未作答" : "暂无已提交答案") + '</div></div></article>';
+    esc(hasAnswer ? live.value : submitted ? "此题未作答" : "暂无已提交答案") + '</div></div></article>' +
+    '<button type="button" class="btn live-review" data-review>回看我的问卷</button>';
 }
 
 function failures() {
@@ -323,13 +333,15 @@ function render() {
   const data = inputs();
   const form = pickForm();
   if (form && !view.form) { view.form = form.id; rememberView(); }
-  const live = room.live;
+  const live = room.live?.qid === view.reviewQuestion ? null : room.live;
   const entering = live && !app().querySelector(".live-sheet");
   const leaving = !live && !!app().querySelector(".live-sheet");
   // Structural changes can affect controls; ordinary autosave/poll replies only
   // patch values. The focused input and composition survive steady-state polling.
   const markup = '<div class="wrap player-wrap">' + heading() + failures() +
-    (live ? liveView(live) : tabs() + (view.tab === "notes" ? notes(data) : survey(form))) + "</div>";
+    (live ? liveView(live) :
+      (room.live ? '<div class="review-bar"><span>访谈进行中</span><button type="button" class="btn" data-resume>返回访谈</button></div>' : "") +
+      tabs() + (view.tab === "notes" ? notes(data) : survey(form))) + "</div>";
   if (templateKey !== markup) {
     let place = capture();
     if (entering && templateKey) { previousPlace = place; store(key("return"), place); }
@@ -348,7 +360,19 @@ function bind() {
   app().addEventListener("click", event => {
     const el = event.target.closest("button");
     if (!el) return;
-    if (el.hasAttribute("data-tab")) view.tab = el.dataset.tab;
+    if (el.hasAttribute("data-resume")) {
+      resumeRequested = true;
+      forceSave = true;
+      mustRead = true;
+      schedule();
+      return;
+    }
+    if (el.hasAttribute("data-review") && room.live) {
+      view.reviewQuestion = room.live.qid;
+      view.form = room.live.form;
+      view.tab = "form";
+      previousPlace = { y: 0 };
+    } else if (el.hasAttribute("data-tab")) view.tab = el.dataset.tab;
     else if (el.hasAttribute("data-form")) { view.form = el.dataset.form; view.tab = "form"; }
     else if (el.hasAttribute("data-dismiss")) { failed = []; store(key("failed"), failed); }
     else return;

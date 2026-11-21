@@ -131,13 +131,36 @@ async function exercise(browser, base) {
   }
   await capture(players[0],'player-interview.png');
   const a = players[0];
+  stage = '个人回看、刷新和返回访谈';
+  await button(a,'回看我的问卷').click();
+  const visibleScore = a.getByRole('group',{name:willingness}).getByRole('radio',{name:'2',exact:true});
+  assert.ok(await visibleScore.isChecked(),'应打开访谈题所在的已交问卷');
+  await a.reload();
+  await visibleScore.waitFor({state:'attached'});
+  assert.ok(await visibleScore.isChecked(),'刷新后仍可回看自己的答案');
+  for (const p of players.slice(1)) assert.ok(await p.locator('.live-answer').isVisible());
+  await button(a,'返回访谈').click();
+  await a.locator('.live-answer').waitFor();
+  assert.equal(await a.locator('.live-answer').textContent(),'2');
+  await button(a,'回看我的问卷').click();
+  await a.locator('[data-form="'+room.forms[1].id+'"]').click();
+  const openText = room.forms[1].questions.find(q=>q.type==='text');
+  await a.getByRole('textbox',{name:openText.label}).fill('回看时补充：星图标记太小');
+  await interview(openText.id);
+  await a.getByRole('heading',{name:openText.label}).waitFor();
+  assert.equal(await a.locator('.live-answer').textContent(),'回看时补充：星图标记太小');
+  await interview(rating.id);
+  await a.getByRole('heading',{name:willingness}).waitFor();
   await admin.locator('[data-action=supplement]').first().click();
   await admin.locator('[name=score]').selectOption('4');
   await admin.locator('[name=reason]').fill('第二局掌握了连招');
   await button(admin,'保存补充').click();
   await until(async()=> (await detail(0)).supplements.some(s=>s.score==='4'),'访谈补充落库');
   assert.equal(await a.locator('.live-answer').textContent(),'2');
+  await button(a,'回看我的问卷').click();
   await button(admin,'结束访谈').click();
+  await button(a,'返回访谈').waitFor({state:'detached'});
+  assert.ok(await visibleScore.isChecked(),'主持人结束访谈后仍能回看');
   await a.locator('#player-survey').waitFor();
   await button(a,'体验问题').click();
   await a.locator('#issue-text').fill('传送门提示太短，想再看一次');
@@ -177,6 +200,7 @@ async function exercise(browser, base) {
   assert.deepEqual(errors,[]);
   console.log('PASS · 6 张二维码解码 · 6 个隔离会话 · 18 份交卷 · 6 条体验问题');
   console.log('PASS · 跨卷切题及个人评分 2/4/3/5/1/4 · 访谈补充 · 草稿同步与恢复');
+  console.log('PASS · 个人回看与返回 · 刷新恢复 · 修改后再次跟题 · 结束后继续回看');
   console.log('PASS · 第七个会话换机 · 离线旧设备退出 · 历史评分 · 封存和重开');
 }
 
