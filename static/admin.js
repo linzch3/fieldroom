@@ -150,7 +150,7 @@ function shell() {
 }
 
 const sections = [
-  ["overview", "场次概览"], ["forms", "问卷编排"], ["interview", "访谈控制"], ["cards", "玩家卡"]
+  ["overview", "场次概览"], ["forms", "问卷编排"], ["interview", "访谈控制"], ["cards", "入场卡"]
 ];
 function render() {
   const room = state.room;
@@ -182,8 +182,8 @@ function overviewView() {
   return `<section class="stack"><div class="section-head"><h2>交卷进度</h2>
     ${statusBadge(sealed ? "场次已封存" : interviews.length ? `${interviews.length} 组访谈进行中` : "场次进行中", !sealed)}</div>
     <div class="progress-grid">${cards}</div></section>
-    <section class="panel admin-section"><div class="section-head"><h2>玩家记录</h2><span class="muted">共 ${players.length} 人</span></div>
-    <div class="table-wrap"><table><thead><tr><th>玩家</th>${forms.map(form => `<th>${escapeHTML(form.title)}</th>`).join("")}<th>记录</th></tr></thead>
+    <section class="panel admin-section"><div class="section-head"><h2>受访者记录</h2><span class="muted">共 ${players.length} 人</span></div>
+    <div class="table-wrap"><table><thead><tr><th>受访者</th>${forms.map(form => `<th>${escapeHTML(form.title)}</th>`).join("")}<th>记录</th></tr></thead>
     <tbody>${rows}</tbody></table></div></section>`;
 }
 function formsView() {
@@ -288,13 +288,13 @@ function interviewView() {
   return directory + `<section class="panel admin-section interview-control"><div class="section-head"><h2>${escapeHTML(caption)}</h2>
     ${group ? actionButton("end","结束访谈") : ""}</div>
     <div class="control-group"><h3>受访者</h3><div class="row target-list">${pickers}</div></div>
-    ${conflicts.length ? `<div class="row"><small>所选玩家中有人已加入其他组。</small>${actionButton("remove-occupied","移除已占用的选择")}</div>` : ""}
+    ${conflicts.length ? `<div class="row"><small>所选受访者中有人已加入其他组。</small>${actionButton("remove-occupied","移除已占用的选择")}</div>` : ""}
     <label class="field">访谈题目<select id="preview-question"${room.sealed || !options ? " disabled" : ""}>
     ${question ? "" : `<option value="" selected>${options ? "请选择题目" : "请先开放一份问卷"}</option>`}${options}</select></label>
     <div class="preview-line"><div><strong>${escapeHTML(progress)}</strong>
     ${missing.length ? `<small>未交卷 · ${escapeHTML(missing.map(p=>p.name).join("、"))}</small>` : ""}</div>
     ${actionButton("show","向受访者展示",{style:"primary",disabled:unavailable})}</div>
-    ${selected.length > 6 ? '<p class="muted">每次访谈最多选择六位玩家。</p>' : ""}</section>
+    ${selected.length > 6 ? '<p class="muted">每次访谈最多选择六位受访者。</p>' : ""}</section>
     ${group ? supplementList(group) : ""}`;
 }
 function supplementList(group) {
@@ -316,15 +316,15 @@ async function endInterview() {
   rememberInterview(null);
   state.previewDirty = false;
   await loadRoom();
-  toast("访谈已结束，玩家可继续填写");
+  toast("访谈已结束，受访者可继续填写");
 }
 function cardsView() {
-  return `<section class="stack"><div class="section-head no-print"><h2>玩家入场卡</h2>${actionButton("print","打印玩家卡")}</div>
-    <p class="muted no-print">让玩家连接场内 Wi-Fi，扫描自己的卡。换机时重新扫码。</p>
+  return `<section class="stack"><div class="section-head no-print"><h2>受访者入场卡</h2>${actionButton("print","打印入场卡")}</div>
+    <p class="muted no-print">让受访者连接场内 Wi-Fi，扫描自己的卡。换机时重新扫码。</p>
     <div id="cards-grid" class="player-cards">${state.room.players.map(p => `<article class="card player-card">
     <p class="eyebrow">${escapeHTML(state.room.title)}</p><h3>${escapeHTML(p.name)}</h3>
     <div class="card-qr" data-qr-for="${escapeHTML(p.id)}" aria-label="${escapeHTML(p.name)}的二维码">二维码生成中…</div>
-    <div class="no-print">${actionButton("copy-player", "复制玩家链接", {value:p.id})}</div></article>`).join("")}</div></section>`;
+    <div class="no-print">${actionButton("copy-player", "复制受访者链接", {value:p.id})}</div></article>`).join("")}</div></section>`;
 }
 async function fillQRCodes() {
   const epoch = ++state.qrEpoch;
@@ -493,7 +493,7 @@ async function showDetail(id) {
 async function showSupplement(id) {
   const live = activeInterview();
   const question = byId(questions(), live?.qid);
-  if (!question || !live.players.includes(id)) throw new Error("访谈题目已更改，请重新选择玩家。");
+  if (!question || !live.players.includes(id)) throw new Error("访谈题目已更改，请重新选择受访者。");
   const p = byId(state.room.players, id);
   const details = await adminRead("/api/manage/player?id=" + encodeURIComponent(id));
   const submitted = details.submitted.includes(question.form.id);

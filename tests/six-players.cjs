@@ -27,10 +27,12 @@ async function until(check, label, timeout=12000) {
   throw new Error('等待超时 · ' + label);
 }
 function button(page, name) { return page.getByRole('button',{name,exact:true}); }
-async function capture(page, file) {
+async function capture(page, file, selector) {
   if (!screenshots) return;
   fs.mkdirSync(screenshots,{recursive:true});
-  await page.screenshot({path:path.join(screenshots,file)});
+  await page.locator('#notice').waitFor({state:'hidden'});
+  const target = selector ? page.locator(selector) : page;
+  await target.screenshot({path:path.join(screenshots,file)});
 }
 async function exercise(browser, base) {
   const errors = [];
@@ -43,6 +45,7 @@ async function exercise(browser, base) {
   }
   const admin = await pageInNewContext({width:1280,height:900});
   await admin.goto(base);
+  await capture(admin,'cover.png','.intro');
   await admin.locator('[name=title]').fill(title);
   await button(admin,'创建场次').click();
   await admin.locator('#room-title').waitFor();
@@ -55,7 +58,7 @@ async function exercise(browser, base) {
   let room = await inspect('/api/manage');
   const detail = player => inspect('/api/manage/player?id='+room.players[player].id);
   stage = '生成并解码六张入场卡';
-  await button(admin,'玩家卡').click();
+  await button(admin,'入场卡').click();
   await until(()=>admin.locator('.card-qr img').evaluateAll(imgs=>imgs.length===6 && imgs.every(i=>i.naturalWidth>0)),stage);
   const links = [];
   for (let index=0;index<6;index++) {
@@ -70,7 +73,7 @@ async function exercise(browser, base) {
   const players = await Promise.all(links.map(async(link,index)=>{
     const page = await pageInNewContext({width:390+index*15,height:844});
     await page.goto(link);
-    await page.getByRole('heading',{name:'玩家 '+String.fromCharCode(65+index)}).waitFor();
+    await page.getByRole('heading',{name:'受访者 '+String.fromCharCode(65+index)}).waitFor();
     return page;
   }));
   await button(admin,'问卷编排').click();
@@ -129,7 +132,8 @@ async function exercise(browser, base) {
     await p.getByRole('heading',{name:willingness}).waitFor();
     assert.equal(await p.locator('.live-answer').textContent(),scores[index]);
   }
-  await capture(players[0],'player-interview.png');
+  await capture(players[0],'player-interview.png','.player-wrap');
+  await capture(players[1],'participant-b.png','.player-wrap');
   const a = players[0];
   stage = '个人回看、刷新和返回访谈';
   await button(a,'回看我的问卷').click();
@@ -216,7 +220,7 @@ async function exercise(browser, base) {
   await until(async()=>await groupControl(secondAdmin,groupId).getAttribute('aria-pressed')==='true','刷新后继续管理所选组');
   assert.equal(await groupControl(admin,soloId).getAttribute('aria-pressed'),'true');
   assert.ok(await newA.getByRole('heading',{name:willingness}).isVisible());
-  await capture(admin,'parallel-interviews.png');
+  await capture(admin,'parallel-interviews.png','.group-directory');
 
   // One host can inspect the other group without changing any participant screen.
   await groupControl(admin,groupId).click();

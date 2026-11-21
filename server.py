@@ -231,10 +231,14 @@ def question(label, kind, options=None, required=True):
     return dict(id=identifier(), label=label, type=kind, options=options or [], required=required)
 
 
+def participant_suffix(position):
+    return chr(65 + position) if position < 26 else str(position + 1)
+
+
 def create_room(db, data):
     title = short(data.get("title"), "场次名称", 100)
     count = data.get("count", 6)
-    require(type(count) is int and 1 <= count <= 200, "玩家人数需为 1 至 200")
+    require(type(count) is int and 1 <= count <= 200, "受访者人数需为 1 至 200")
     room, admin = identifier(), token()
     db.execute("INSERT INTO rooms(id,admin,title) VALUES(?,?,?)", (room, admin, title))
     forms = [
@@ -266,10 +270,10 @@ def create_room(db, data):
             (identifier(), room, pos, name, dump(questions)),
         )
     for pos in range(count):
-        name = chr(65 + pos) if pos < 26 else str(pos + 1)
+        name = participant_suffix(pos)
         db.execute(
             "INSERT INTO players(id,room,position,name,code) VALUES(?,?,?,?,?)",
-            (identifier(), room, pos, "玩家 " + name, token()),
+            (identifier(), room, pos, "受访者 " + name, token()),
         )
     return {"admin": admin}
 
@@ -373,7 +377,7 @@ def player_record(db, player, *, include_history=False, before_history=None):
 
 def managed_player(db, room, player):
     row = db.execute("SELECT * FROM players WHERE room=? AND id=?", (room, player)).fetchone()
-    require(row, "找不到该玩家", 404)
+    require(row, "找不到该受访者", 404)
     return row
 
 
@@ -414,13 +418,13 @@ def update_interview(db, room, body):
     else:
         form, question = find_question(db, room["id"], body.get("qid"))
         players = body.get("players")
-        require(isinstance(players, list) and 1 <= len(players) <= 6, "每次访谈请选择 1 至 6 位玩家")
+        require(isinstance(players, list) and 1 <= len(players) <= 6, "每次访谈请选择 1 至 6 位受访者")
         require(len(players) == len(set(players)), "请勿重复选择受访者")
         for pid in players:
             managed_player(db, room["id"], pid)
         require(form["open"], "请先开放这份问卷，再展示题目", 409)
         occupied = {pid for group in groups if group is not current for pid in group["players"]}
-        require(occupied.isdisjoint(players), "所选玩家正在另一场访谈，请刷新后重新选择", 409)
+        require(occupied.isdisjoint(players), "所选受访者正在另一场访谈，请刷新后重新选择", 409)
         if current is None:
             current = {"id": identifier()}
             groups.append(current)
@@ -433,6 +437,14 @@ def update_interview(db, room, body):
     return result
 
 
+def participant_label(player):
+    # Older rooms stored the generated role in the name. Keep custom names intact.
+    suffix = participant_suffix(player["position"])
+    if player["name"] == "玩家 " + suffix:
+        return "受访者 " + suffix
+    return player["name"]
+
+
 def manage_state(db, room, base):
     groups = active_interviews(room)
     by_player = {}
@@ -442,7 +454,7 @@ def manage_state(db, room, base):
     ):
         by_player.setdefault(r["player"], []).append(r["form"])
     players = [
-        dict(id=p["id"], name=p["name"], code=p["code"], submitted=by_player.get(p["id"], []))
+        dict(id=p["id"], name=participant_label(p), code=p["code"], submitted=by_player.get(p["id"], []))
         for p in db.execute("SELECT * FROM players WHERE room=? ORDER BY position", (room["id"],))
     ]
     return dict(
@@ -482,7 +494,7 @@ def play_state(db, room, player):
     return dict(
         **data,
         id=player["id"],
-        name=player["name"],
+        name=participant_label(player),
         title=room["title"],
         sealed=bool(room["sealed"]),
         rev=player["rev"],
@@ -723,7 +735,7 @@ def handle(h, method, path, query, body):
             return create_room(db, body)
         if method == "POST" and path == "/api/claim":
             player = db.execute("SELECT * FROM players WHERE code=?", (body.get("code"),)).fetchone()
-            require(player, "玩家卡无效，请重新扫码", 401)
+            require(player, "入场卡无效，请重新扫码", 401)
             device = token()
             db.execute("UPDATE players SET device=? WHERE id=?", (device, player["id"]))
             # Obsolete leases are checked before any replay receipt or write.
@@ -778,7 +790,7 @@ def share_base(bind_host, port):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="本地线下游戏用研问卷平台")
+    parser = argparse.ArgumentParser(description="本地线下用户研究问卷与访谈平台")
     parser.add_argument("--host", default="0.0.0.0", help="默认在局域网提供服务")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)

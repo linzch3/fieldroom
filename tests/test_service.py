@@ -112,6 +112,14 @@ class ServiceTests(unittest.TestCase):
         self.play(op="answer", qid=self.choice["id"], value=self.choice["options"][0])
         self.play(op="submit", form=self.form["id"])
 
+    def test_old_generated_names_use_the_current_label_on_both_screens(self):
+        with server.connection(self.db, write=True) as db:
+            db.execute("UPDATE players SET name=? WHERE id=?", ("玩家 A", self.cards[0]["id"]))
+            db.execute("UPDATE players SET name=? WHERE id=?", ("访客小蓝", self.cards[1]["id"]))
+        roster = self.call("/api/manage", key=self.admin)["players"]
+        self.assertEqual([p["name"] for p in roster[:2]], ["受访者 A", "访客小蓝"])
+        self.assertEqual(self.call("/api/play", key=self.key)["name"], "受访者 A")
+
     def test_takeover_invalidates_stale_writes_even_after_reopen(self):
         self.submitted()
         self.play(op="note", id="stable-note", text="虚构草稿", submitted=False)

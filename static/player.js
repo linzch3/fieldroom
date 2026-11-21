@@ -212,7 +212,7 @@ function heading() {
 }
 
 function tabs() {
-  return '<nav class="player-tabs" aria-label="玩家工作区">' +
+  return '<nav class="player-tabs" aria-label="受访者工作区">' +
     [["form", "我的问卷"], ["notes", "体验问题"]].map(([id, title]) =>
       '<button type="button" data-tab="' + id + '" aria-pressed="' + (view.tab === id) + '">' + title + "</button>"
     ).join("") + "</nav>";
