@@ -1,0 +1,17 @@
+# Local sessions and capabilities
+data/
+private/
+work/
+.env
+.env.*
+*.sqlite*
+*.db
+*.db-*
+*.log
+.venv/
+.qa/
+__pycache__/
+.pytest_cache/
+.DS_Store
+test-results/
+node_modules/
